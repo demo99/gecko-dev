@@ -28,6 +28,7 @@
 #include "mozilla/TimeStamp.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
+#include "LayersLogging.h"
 
 bool is_in_main_thread()
 {

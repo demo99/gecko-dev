@@ -80,6 +80,15 @@
 #include "mozilla/dom/Link.h"
 #include "SVGImageContext.h"
 
+#include "mozilla/layers/ImageClient.h"
+#include "mozilla/layers/WebRenderLayerManager.h"
+#include "mozilla/layers/WebRenderBridgeChild.h"
+#include "mozilla/webrender/WebRenderAPI.h"
+#include "mozilla/layers/ScrollingLayersHelper.h"
+#include "mozilla/layers/StackingContextHelper.h"
+#include "mozilla/layers/CompositorBridgeChild.h"
+#include "ImageContainer.h"
+
 using namespace mozilla;
 using namespace mozilla::dom;
 using namespace mozilla::gfx;
@@ -1685,6 +1694,31 @@ nsDisplayImage::BuildLayer(nsDisplayListBuilder* aBuilder,
   layer->SetContainer(container);
   ConfigureLayer(layer, aParameters);
   return layer.forget();
+}
+
+bool
+nsDisplayImage::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                        const StackingContextHelper& aSc,
+                                        nsTArray<WebRenderParentCommand>& aParentCommands,
+                                        WebRenderLayerManager* aManager,
+                                        nsDisplayListBuilder* aDisplayListBuilder)
+{
+  if (!CanOptimizeToImageLayer(aManager, aDisplayListBuilder)) {
+    return false;
+  }
+
+  uint32_t flags = imgIContainer::FLAG_ASYNC_NOTIFY;
+  if (aDisplayListBuilder->ShouldSyncDecodeImages()) {
+    flags |= imgIContainer::FLAG_SYNC_DECODE;
+  }
+
+  RefPtr<ImageContainer> container =
+    mImage->GetImageContainer(aManager, flags);
+  if (!container) {
+    return false;
+  }
+
+  return aManager->PushImage(this, aBuilder, aSc, container);
 }
 
 DrawResult

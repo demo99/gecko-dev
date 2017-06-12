@@ -47,6 +47,11 @@ public:
                                        const StackingContextHelper& aSc,
                                        nsTArray<WebRenderParentCommand>& aParentCommands,
                                        mozilla::layers::WebRenderDisplayItemLayer* aLayer) override;
+  virtual bool CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                       const StackingContextHelper& aSc,
+                                       nsTArray<WebRenderParentCommand>& aParentCommands,
+                                       mozilla::layers::WebRenderLayerManager* aManager,
+                                       nsDisplayListBuilder* aDisplayListBuilder);
   virtual void Paint(nsDisplayListBuilder* aBuilder,
                      gfxContext* aCtx) override;
 
@@ -111,8 +116,39 @@ nsDisplayColumnRule::CreateWebRenderCommands(wr::DisplayListBuilder& aBuilder,
 {
   MOZ_ASSERT(!mBorderRenderers.IsEmpty());
   for (auto iter = mBorderRenderers.begin(); iter != mBorderRenderers.end(); iter++) {
-      iter->CreateWebRenderCommands(aBuilder, aSc, aLayer);
+      iter->CreateWebRenderCommands(aBuilder, aSc);
   }
+}
+
+bool
+nsDisplayColumnRule::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                             const StackingContextHelper& aSc,
+                                             nsTArray<WebRenderParentCommand>& aParentCommands,
+                                             mozilla::layers::WebRenderLayerManager* aManager,
+                                             nsDisplayListBuilder* aDisplayListBuilder)
+{
+  RefPtr<gfxContext> screenRefCtx =
+    gfxContext::CreateOrNull(gfxPlatform::GetPlatform()->ScreenReferenceDrawTarget());
+
+  nsTArray<nsCSSBorderRenderer> borderRenderers;
+  static_cast<nsColumnSetFrame*>(mFrame)->
+    CreateBorderRenderers(borderRenderers, screenRefCtx, mVisibleRect, ToReferenceFrame());
+
+  if (borderRenderers.IsEmpty()) {
+    return false;
+  }
+
+  for (auto iter = borderRenderers.begin(); iter != borderRenderers.end(); iter++) {
+    if (!iter->CanCreateWebRenderCommands()) {
+      return false;
+    }
+  }
+
+  for (auto iter = borderRenderers.begin(); iter != borderRenderers.end(); iter++) {
+      iter->CreateWebRenderCommands(aBuilder, aSc);
+  }
+
+  return true;
 }
 
 /**

@@ -21,6 +21,7 @@
 #include "nsStyleStructInlines.h"
 #include "nsSVGEffects.h"
 #include "nsSVGIntegrationUtils.h"
+#include "ImageContainer.h"
 
 using namespace mozilla;
 using namespace mozilla::gfx;
@@ -583,6 +584,8 @@ nsImageRenderer::BuildWebRenderDisplayItems(nsPresContext*       aPresContext,
                                             const mozilla::layers::StackingContextHelper& aSc,
                                             nsTArray<WebRenderParentCommand>&           aParentCommands,
                                             mozilla::layers::WebRenderDisplayItemLayer* aLayer,
+                                            mozilla::layers::WebRenderLayerManager* aManager,
+                                            nsDisplayItem*       aItem,
                                             const nsRect&        aDirtyRect,
                                             const nsRect&        aDest,
                                             const nsRect&        aFill,
@@ -617,13 +620,16 @@ nsImageRenderer::BuildWebRenderDisplayItems(nsPresContext*       aPresContext,
       if (mFlags & nsImageRenderer::FLAG_SYNC_DECODE_IMAGES) {
         containerFlags |= imgIContainer::FLAG_SYNC_DECODE;
       }
-      RefPtr<layers::ImageContainer> container = mImageContainer->GetImageContainer(aLayer->WrManager(),
+      RefPtr<layers::ImageContainer> container = mImageContainer->GetImageContainer(aManager,
                                                                                     containerFlags);
       if (!container) {
         NS_WARNING("Failed to get image container");
         return DrawResult::NOT_READY;
       }
-      Maybe<wr::ImageKey> key = aLayer->SendImageContainer(container, aParentCommands);
+
+      gfx::IntSize size;
+      Maybe<wr::ImageKey> key = aManager->CreateImageKey(aItem, container, aBuilder, aSc, size);
+
       if (key.isNothing()) {
         return DrawResult::BAD_IMAGE;
       }
@@ -723,6 +729,8 @@ nsImageRenderer::BuildWebRenderDisplayItemsForLayer(nsPresContext*       aPresCo
                                                     const mozilla::layers::StackingContextHelper& aSc,
                                                     nsTArray<WebRenderParentCommand>& aParentCommands,
                                                     WebRenderDisplayItemLayer*       aLayer,
+                                                    mozilla::layers::WebRenderLayerManager* aManager,
+                                                    nsDisplayItem*       aItem,
                                                     const nsRect&        aDest,
                                                     const nsRect&        aFill,
                                                     const nsPoint&       aAnchor,
@@ -738,8 +746,8 @@ nsImageRenderer::BuildWebRenderDisplayItemsForLayer(nsPresContext*       aPresCo
       mSize.width <= 0 || mSize.height <= 0) {
     return DrawResult::SUCCESS;
   }
-
-  return BuildWebRenderDisplayItems(aPresContext, aBuilder, aSc, aParentCommands, aLayer,
+  return BuildWebRenderDisplayItems(aPresContext, aBuilder, aSc, aParentCommands,
+                                    aLayer, aManager, aItem,
                                     aDirty, aDest, aFill, aAnchor, aRepeatSize,
                                     CSSIntRect(0, 0,
                                                nsPresContext::AppUnitsToIntCSSPixels(mSize.width),

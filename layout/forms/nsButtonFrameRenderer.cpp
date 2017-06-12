@@ -144,6 +144,11 @@ public:
                                        const StackingContextHelper& aSc,
                                        nsTArray<WebRenderParentCommand>& aParentCommands,
                                        WebRenderDisplayItemLayer* aLayer) override;
+  virtual bool CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                       const StackingContextHelper& aSc,
+                                       nsTArray<WebRenderParentCommand>& aParentCommands,
+                                       mozilla::layers::WebRenderLayerManager* aManager,
+                                       nsDisplayListBuilder* aDisplayListBuilder) override;
   NS_DISPLAY_DECL_NAME("ButtonBorderBackground", TYPE_BUTTON_BORDER_BACKGROUND)
 private:
   nsButtonFrameRenderer* mBFR;
@@ -215,12 +220,61 @@ nsDisplayButtonBorder::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& 
   // This is really a combination of paint box shadow inner +
   // paint border.
   nsRect buttonRect = nsRect(ToReferenceFrame(), mFrame->GetSize());
+
+  int32_t appUnitsPerDevPixel = mFrame->PresContext()->AppUnitsPerDevPixel();
+  nsRegion visible = aLayer->GetVisibleRegion().ToAppUnits(appUnitsPerDevPixel);
   nsDisplayBoxShadowInner::CreateInsetBoxShadowWebRenderCommands(aBuilder,
                                                                  aSc,
-                                                                 aLayer,
+                                                                 visible,
                                                                  mFrame,
                                                                  buttonRect);
-  mBorderRenderer->CreateWebRenderCommands(aBuilder, aSc, aLayer);
+  mBorderRenderer->CreateWebRenderCommands(aBuilder, aSc);
+}
+
+bool
+nsDisplayButtonBorder::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                               const StackingContextHelper& aSc,
+                                               nsTArray<WebRenderParentCommand>& aParentCommands,
+                                               mozilla::layers::WebRenderLayerManager* aManager,
+                                               nsDisplayListBuilder* aDisplayListBuilder)
+{
+  nsPoint offset = ToReferenceFrame();
+  if (!nsDisplayBoxShadowInner::CanCreateWebRenderCommands(aDisplayListBuilder,
+                                                           mFrame,
+                                                           offset)) {
+    return false;
+  }
+
+  Maybe<nsCSSBorderRenderer> br =
+    nsCSSRendering::CreateBorderRenderer(mFrame->PresContext(),
+                                         nullptr,
+                                         mFrame,
+                                         nsRect(),
+                                         nsRect(offset, mFrame->GetSize()),
+                                         mFrame->StyleContext(),
+                                         mFrame->GetSkipSides());
+  if (!br) {
+    return false;
+  }
+
+  if (!br->CanCreateWebRenderCommands()) {
+    return false;
+  }
+
+  // This is really a combination of paint box shadow inner +
+  // paint border.
+  nsRect buttonRect = nsRect(ToReferenceFrame(), mFrame->GetSize());
+  nsRegion visible;
+  bool snap;
+  visible.OrWith(GetBounds(aDisplayListBuilder, &snap));
+  nsDisplayBoxShadowInner::CreateInsetBoxShadowWebRenderCommands(aBuilder,
+                                                                 aSc,
+                                                                 visible,
+                                                                 mFrame,
+                                                                 buttonRect);
+  br->CreateWebRenderCommands(aBuilder, aSc);
+
+  return true;
 }
 
 void
@@ -292,6 +346,11 @@ public:
                                         const StackingContextHelper& aSc,
                                         nsTArray<WebRenderParentCommand>& aParentCommands,
                                         WebRenderDisplayItemLayer* aLayer) override;
+   virtual bool CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                        const StackingContextHelper& aSc,
+                                        nsTArray<WebRenderParentCommand>& aParentCommands,
+                                        mozilla::layers::WebRenderLayerManager* aManager,
+                                        nsDisplayListBuilder* aDisplayListBuilder) override;
   NS_DISPLAY_DECL_NAME("ButtonForeground", TYPE_BUTTON_FOREGROUND)
 private:
   nsButtonFrameRenderer* mBFR;
@@ -380,7 +439,31 @@ nsDisplayButtonForeground::CreateWebRenderCommands(wr::DisplayListBuilder& aBuil
                                                    mozilla::layers::WebRenderDisplayItemLayer* aLayer)
 {
   MOZ_ASSERT(mBorderRenderer.isSome());
-  mBorderRenderer->CreateWebRenderCommands(aBuilder, aSc, aLayer);
+  mBorderRenderer->CreateWebRenderCommands(aBuilder, aSc);
+}
+
+bool
+nsDisplayButtonForeground::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                                   const StackingContextHelper& aSc,
+                                                   nsTArray<WebRenderParentCommand>& aParentCommands,
+                                                   mozilla::layers::WebRenderLayerManager* aManager,
+                                                   nsDisplayListBuilder* aDisplayListBuilder)
+{
+  Maybe<nsCSSBorderRenderer> br;
+
+  nsPresContext *presContext = mFrame->PresContext();
+  const nsStyleDisplay *disp = mFrame->StyleDisplay();
+  if (!mFrame->IsThemed(disp) ||
+      !presContext->GetTheme()->ThemeDrawsFocusForWidget(disp->mAppearance)) {
+    nsRect r = nsRect(ToReferenceFrame(), mFrame->GetSize());
+    br = mBFR->CreateInnerFocusBorderRenderer(aDisplayListBuilder, presContext, nullptr, mVisibleRect, r);
+  }
+
+  if (!br || !br->CanCreateWebRenderCommands()) {
+    return false;
+  }
+
+  mBorderRenderer->CreateWebRenderCommands(aBuilder, aSc);
 }
 
 nsresult

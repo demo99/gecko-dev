@@ -11,8 +11,14 @@
 #include "mozilla/layers/APZTestData.h"
 #include "mozilla/layers/TransactionIdAllocator.h"
 #include "mozilla/webrender/WebRenderTypes.h"
+#include "mozilla/layers/StackingContextHelper.h"
+#include "mozilla/layers/AnimationHelper.h"
+#include "mozilla/layers/ImageClient.h"
+#include "mozilla/layers/WebRenderBridgeChild.h"
+#include "mozilla/webrender/WebRenderAPI.h"
 
 class nsIWidget;
+class nsDisplayList;
 
 namespace mozilla {
 namespace layers {
@@ -21,6 +27,99 @@ class CompositorBridgeChild;
 class KnowsCompositor;
 class PCompositorBridgeChild;
 class WebRenderBridgeChild;
+
+class WMAnimationData
+{
+public:
+  NS_INLINE_DECL_REFCOUNTING(TransactionIdAllocator)
+
+  typedef InfallibleTArray<Animation> AnimationArray;
+
+  WMAnimationData()
+  : mAnimationGeneration(0),
+    mCompositorAnimationsId(0)
+  {
+  }
+
+  Animation* AddAnimation()
+  {
+    // Here generates a new id when the first animation is added and
+    // this id is used to represent the animations in this layer.
+    //EnsureAnimationsId();
+    if (!mCompositorAnimationsId) {
+      mCompositorAnimationsId = AnimationHelper::GetNextCompositorAnimationsId();
+    }
+
+    MOZ_ASSERT(!mPendingAnimations, "should have called ClearAnimations first");
+
+    Animation* anim = mAnimations.AppendElement();
+
+    //Mutated();
+    return anim;
+  }
+
+  Animation* AddAnimationForNextTransaction()
+  {
+    MOZ_ASSERT(mPendingAnimations,
+               "should have called ClearAnimationsForNextTransaction first");
+
+    Animation* anim = mPendingAnimations->AppendElement();
+
+    return anim;
+  }
+
+  bool HasTransformAnimation() const
+  {
+    for (uint32_t i = 0; i < mAnimations.Length(); i++) {
+      if (mAnimations[i].property() == eCSSProperty_transform) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  AnimationArray& GetAnimations() { return mAnimations; }
+
+  void UpdateTransformDataForAnimation()
+  {
+    for (Animation& animation : mAnimations) {
+      if (animation.property() == eCSSProperty_transform) {
+        // TODO
+        //TransformData& transformData = animation.data().get_TransformData();
+        //transformData.inheritedXScale() = GetInheritedXScale();
+        //transformData.inheritedYScale() = GetInheritedYScale();
+        //transformData.hasPerspectiveParent() =
+          //GetParent() && GetParent()->GetTransformIsPerspective();
+      }
+    }
+  }
+
+  uint64_t mAnimationGeneration;
+  uint64_t mCompositorAnimationsId;
+  AnimationArray mAnimations;
+  nsAutoPtr<AnimationArray> mPendingAnimations;
+};
+
+class WMImageData
+{
+public:
+  NS_INLINE_DECL_REFCOUNTING(TransactionIdAllocator)
+
+  wr::MaybeExternalImageId mExternalImageId;
+  Maybe<wr::ImageKey> mKey;
+  RefPtr<ImageClient> mImageClient;
+  CompositableType mImageClientTypeContainer;
+  Maybe<wr::PipelineId> mPipelineId;
+};
+
+class WMItemData
+{
+public:
+  NS_INLINE_DECL_REFCOUNTING(TransactionIdAllocator)
+
+  RefPtr<WMAnimationData> mAnimationData;
+  RefPtr<WMImageData> mImageData;
+};
 
 class WebRenderLayerManager final : public LayerManager
 {
@@ -45,6 +144,25 @@ public:
   virtual bool BeginTransactionWithTarget(gfxContext* aTarget) override;
   virtual bool BeginTransaction() override;
   virtual bool EndEmptyTransaction(EndTransactionFlags aFlags = END_DEFAULT) override;
+  Maybe<wr::ImageKey> CreateImageKey(nsDisplayItem* aItem,
+                                     ImageContainer* aContainer,
+                                     mozilla::wr::DisplayListBuilder& aBuilder,
+                                     const StackingContextHelper& aSc,
+                                     gfx::IntSize& aSize);
+  bool PushImage(nsDisplayItem* aItem,
+                 mozilla::wr::DisplayListBuilder& aBuilder,
+                 const StackingContextHelper& aSc,
+                 ImageContainer* aContainer);
+
+  static void CreateWebRenderCommandsFromDisplayList(WebRenderLayerManager* aManager,
+                                                     nsDisplayList* aDisplayList,
+                                                     nsDisplayListBuilder* aDisplayListBuilder,
+                                                     StackingContextHelper& aSc,
+                                                     wr::DisplayListBuilder& aBuilder);
+  void EndTransactionWithoutLayer(nsDisplayList* aDisplayList,
+                                  nsDisplayListBuilder* aDisplayListBuilder);
+  //void AddAnimation(nsDisplayItem* aItem);
+
   virtual void EndTransaction(DrawPaintedLayerCallback aCallback,
                               void* aCallbackData,
                               EndTransactionFlags aFlags = END_DEFAULT) override;
@@ -137,6 +255,12 @@ public:
   const APZTestData& GetAPZTestData() const
   { return mApzTestData; }
 
+  void SendAnimationData(WMAnimationData* aAnimationData,
+                         OptionalOpacity aOpacity,
+                         OptionalTransform aTransform);
+  already_AddRefed<WMAnimationData> CreateOrRecycleAnimationData(nsDisplayItem* aItem);
+  already_AddRefed<WMImageData> CreateOrRecycleImageData(nsDisplayItem* aItem);
+
 private:
   /**
    * Take a snapshot of the parent context, and copy
@@ -150,6 +274,8 @@ private:
                               void* aCallbackData,
                               EndTransactionFlags aFlags);
 
+  std::map<nsIFrame*, std::map<uint32_t, RefPtr<WMItemData>>> mItemData;
+  std::map<nsIFrame*, std::map<uint32_t, RefPtr<WMItemData>>> mLastItemData;
 
 private:
   nsIWidget* MOZ_NON_OWNING_REF mWidget;

@@ -1998,7 +1998,9 @@ nsCSSRendering::BuildWebRenderDisplayItemsForStyleImageLayer(const PaintBGParams
                                                              mozilla::wr::DisplayListBuilder& aBuilder,
                                                              const mozilla::layers::StackingContextHelper& aSc,
                                                              nsTArray<WebRenderParentCommand>& aParentCommands,
-                                                             mozilla::layers::WebRenderDisplayItemLayer* aLayer)
+                                                             mozilla::layers::WebRenderDisplayItemLayer* aLayer,
+                                                             mozilla::layers::WebRenderLayerManager* aManager,
+                                                             nsDisplayItem* aItem)
 {
   NS_PRECONDITION(aParams.frame,
                   "Frame is expected to be provided to BuildWebRenderDisplayItemsForStyleImageLayer");
@@ -2021,8 +2023,8 @@ nsCSSRendering::BuildWebRenderDisplayItemsForStyleImageLayer(const PaintBGParams
 
     sc = aParams.frame->StyleContext();
   }
-
-  return BuildWebRenderDisplayItemsForStyleImageLayerWithSC(aParams, aBuilder, aSc, aParentCommands, aLayer,
+  return BuildWebRenderDisplayItemsForStyleImageLayerWithSC(aParams, aBuilder, aSc, aParentCommands,
+                                                            aLayer, aManager, aItem,
                                                             sc, *aParams.frame->StyleBorder());
 }
 
@@ -2745,6 +2747,8 @@ nsCSSRendering::BuildWebRenderDisplayItemsForStyleImageLayerWithSC(const PaintBG
                                                                    const mozilla::layers::StackingContextHelper& aSc,
                                                                    nsTArray<WebRenderParentCommand>& aParentCommands,
                                                                    mozilla::layers::WebRenderDisplayItemLayer* aLayer,
+                                                                   mozilla::layers::WebRenderLayerManager* aManager,
+                                                                   nsDisplayItem* aItem,
                                                                    nsStyleContext *aBackgroundSC,
                                                                    const nsStyleBorder& aBorder)
 {
@@ -2753,7 +2757,6 @@ nsCSSRendering::BuildWebRenderDisplayItemsForStyleImageLayerWithSC(const PaintBG
                                                              aParams.frame,
                                                              aBackgroundSC->StyleBackground(),
                                                              aParams.layer));
-
   MOZ_ASSERT(!(aParams.paintFlags & PAINTBG_MASK_IMAGE));
 
   nscoord appUnitsPerPixel = aParams.presCtx.AppUnitsPerDevPixel();
@@ -2790,7 +2793,8 @@ nsCSSRendering::BuildWebRenderDisplayItemsForStyleImageLayerWithSC(const PaintBG
   result &= state.mImageRenderer.PrepareResult();
   if (!state.mFillArea.IsEmpty()) {
     return state.mImageRenderer.BuildWebRenderDisplayItemsForLayer(&aParams.presCtx,
-                                     aBuilder, aSc, aParentCommands, aLayer,
+                                     aBuilder, aSc, aParentCommands,
+                                     aLayer, aManager, aItem,
                                      state.mDestArea, state.mFillArea,
                                      state.mAnchor + paintBorderArea.TopLeft(),
                                      clipState.mDirtyRectInAppUnits,

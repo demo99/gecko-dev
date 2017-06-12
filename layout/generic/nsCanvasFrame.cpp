@@ -323,6 +323,17 @@ nsDisplayCanvasBackgroundColor::CreateWebRenderCommands(mozilla::wr::DisplayList
                     wr::ToWrColor(ToDeviceColor(mColor)));
 }
 
+bool
+nsDisplayCanvasBackgroundColor::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                                        const StackingContextHelper& aSc,
+                                                        nsTArray<WebRenderParentCommand>& aParentCommands,
+                                                        WebRenderLayerManager* aManager,
+                                                        nsDisplayListBuilder* aDisplayListBuilder)
+{
+  CreateWebRenderCommands(aBuilder, aSc, aParentCommands, nullptr);
+  return true;
+}
+
 #ifdef MOZ_DUMP_PAINTING
 void
 nsDisplayCanvasBackgroundColor::WriteDebugInfo(std::stringstream& aStream)

@@ -1279,6 +1279,11 @@ public:
                                        const StackingContextHelper& aSc,
                                        nsTArray<WebRenderParentCommand>& aParentCommands,
                                        WebRenderDisplayItemLayer* aLayer) override;
+  virtual bool CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                       const StackingContextHelper& aSc,
+                                       nsTArray<WebRenderParentCommand>& aParentCommands,
+                                       mozilla::layers::WebRenderLayerManager* aManager,
+                                       nsDisplayListBuilder* aDisplayListBuilder) override;
   virtual LayerState GetLayerState(nsDisplayListBuilder* aBuilder,
                                    LayerManager* aManager,
                                    const ContainerLayerParameters& aParameters) override;
@@ -1323,6 +1328,21 @@ nsDisplayTableBorderCollapse::CreateWebRenderCommands(mozilla::wr::DisplayListBu
                                                                           aParentCommands,
                                                                           aLayer,
                                                                           ToReferenceFrame());
+}
+
+bool
+nsDisplayTableBorderCollapse::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                                      const StackingContextHelper& aSc,
+                                                      nsTArray<WebRenderParentCommand>& aParentCommands,
+                                                      mozilla::layers::WebRenderLayerManager* aManager,
+                                                      nsDisplayListBuilder* aDisplayListBuilder)
+{
+  static_cast<nsTableFrame*>(mFrame)->CreateWebRenderCommandsForBCBorders(aBuilder,
+                                                                          aSc,
+                                                                          aParentCommands,
+                                                                          nullptr,
+                                                                          ToReferenceFrame());
+  return true;
 }
 
 LayerState

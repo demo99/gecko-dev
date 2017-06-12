@@ -20,6 +20,7 @@
 #include "WebRenderPaintedLayerBlob.h"
 #include "WebRenderTextLayer.h"
 #include "WebRenderDisplayItemLayer.h"
+#include "nsDisplayList.h"
 
 namespace mozilla {
 
@@ -165,11 +166,436 @@ PopulateScrollData(WebRenderScrollData& aTarget, Layer* aLayer)
   return descendants + 1;
 }
 
+/*static*/ void
+WebRenderLayerManager::CreateWebRenderCommandsFromDisplayList(WebRenderLayerManager* aManager,
+                                                              nsDisplayList* aDisplayList,
+                                                              nsDisplayListBuilder* aDisplayListBuilder,
+                                                              StackingContextHelper& aSc,
+                                                              wr::DisplayListBuilder& aBuilder)
+{
+  nsDisplayList savedItems;
+  nsDisplayItem* item;
+  while ((item = aDisplayList->RemoveBottom()) != nullptr) {
+    nsDisplayItem::Type itemType = item->GetType();
+
+    // If the item is a event regions item, but is empty (has no regions in it)
+    // then we should just throw it out
+    if (itemType == nsDisplayItem::TYPE_LAYER_EVENT_REGIONS) {
+      nsDisplayLayerEventRegions* eventRegions =
+        static_cast<nsDisplayLayerEventRegions*>(item);
+      if (eventRegions->IsEmpty()) {
+        item->~nsDisplayItem();
+        continue;
+      }
+    }
+
+    // Peek ahead to the next item and try merging with it or swapping with it
+    // if necessary.
+    nsDisplayItem* aboveItem;
+    while ((aboveItem = aDisplayList->GetBottom()) != nullptr) {
+      if (aboveItem->TryMerge(item)) {
+        aDisplayList->RemoveBottom();
+        item->~nsDisplayItem();
+        item = aboveItem;
+        itemType = item->GetType();
+      } else {
+        break;
+      }
+    }
+
+    nsDisplayList* itemSameCoordinateSystemChildren
+      = item->GetSameCoordinateSystemChildren();
+    if (item->ShouldFlattenAway(aDisplayListBuilder)) {
+      aDisplayList->AppendToBottom(itemSameCoordinateSystemChildren);
+      item->~nsDisplayItem();
+      continue;
+    }
+
+    savedItems.AppendToTop(item);
+
+    nsTArray<WebRenderParentCommand> parentCommands;
+    if (!item->CreateWebRenderCommands(aBuilder, aSc, parentCommands, aManager, aDisplayListBuilder)) {
+      // fallback
+    }
+
+    aManager->WrBridge()->AddWebRenderParentCommands(parentCommands);
+  }
+  aDisplayList->AppendToTop(&savedItems);
+}
+
+void
+WebRenderLayerManager::EndTransactionWithoutLayer(nsDisplayList* aDisplayList,
+                                                  nsDisplayListBuilder* aDisplayListBuilder)
+{
+  AutoProfilerTracing tracing("Paint", "EndTransactionWithoutLayer");
+
+  if (!mTransactionIdAllocator) {
+    return;
+  }
+
+  // Since we don't do repeat transactions right now, just set the time
+  mAnimationReadyTime = TimeStamp::Now();
+
+  DiscardImages();
+  WrBridge()->RemoveExpiredFontKeys();
+
+  LayoutDeviceIntSize size = mWidget->GetClientSize();
+  if (!WrBridge()->DPBegin(size.ToUnknownSize())) {
+    return;
+  }
+  StackingContextHelper sc;
+  WrSize contentSize { (float)size.width, (float)size.height };
+  wr::DisplayListBuilder builder(WrBridge()->GetPipeline(), contentSize);
+
+  CreateWebRenderCommandsFromDisplayList(this, aDisplayList, aDisplayListBuilder, sc, builder);
+
+  for (auto itemList : mLastItemData) {
+    for (auto itemDataIter : itemList.second) {
+      WMItemData* data = itemDataIter.second;
+      if (data->mAnimationData) {
+        // discard animation
+        AddCompositorAnimationsIdForDiscard(data->mAnimationData->mCompositorAnimationsId);
+      }
+      if (data->mImageData) {
+        // discard image
+      }
+    }
+  }
+  DiscardCompositorAnimations();
+  
+  mLastItemData = mItemData;
+
+  WrBridge()->ClearReadLocks();
+  // We can't finish this transaction so return. This usually
+  // happens in an empty transaction where we can't repaint a painted layer.
+  // In this case, leave the transaction open and let a full transaction happen.
+  if (mTransactionIncomplete) {
+    DiscardLocalImages();
+    return;
+  }
+
+  WebRenderScrollData scrollData;
+  if (AsyncPanZoomEnabled()) {
+    if (mIsFirstPaint) {
+      scrollData.SetIsFirstPaint();
+      mIsFirstPaint = false;
+    }
+    scrollData.SetPaintSequenceNumber(mPaintSequenceNumber);
+    if (mRoot) {
+      PopulateScrollData(scrollData, mRoot.get());
+    }
+  }
+
+  bool sync = mTarget != nullptr;
+  mLatestTransactionId = mTransactionIdAllocator->GetTransactionId();
+
+  WrBridge()->DPEnd(builder, size.ToUnknownSize(), sync, mLatestTransactionId, scrollData);
+
+  MakeSnapshotIfRequired(size);
+  mNeedsComposite = false;
+
+  // this may result in Layers being deleted, which results in
+  // PLayer::Send__delete__() and DeallocShmem()
+  mKeepAlive.Clear();
+}
+
+void
+WebRenderLayerManager::SendAnimationData(WMAnimationData* aAnimationData,
+                                         OptionalOpacity aOpacity,
+                                         OptionalTransform aTransform)
+{
+  for (size_t animIdx = 0, animEnd = aAnimationData->mAnimations.Length();
+       animIdx < animEnd; animIdx++) {
+    Animation& anim = aAnimationData->mAnimations[animIdx];
+
+    // If the animation is play-pending, resolve the start time.
+    // This mirrors the calculation in Animation::StartTimeFromReadyTime.
+    if (anim.startTime().type() == MaybeTimeDuration::Tnull_t &&
+        !anim.originTime().IsNull() &&
+        !anim.isNotPlaying()) {
+      TimeDuration readyTime = mAnimationReadyTime - anim.originTime();
+      anim.startTime() =
+        anim.playbackRate() == 0
+        ? readyTime
+        : readyTime - anim.holdTime().MultDouble(1.0 /
+                                                 anim.playbackRate());
+    }
+  }
+  MOZ_ASSERT(data);
+  OpAddCompositorAnimations
+    anim(CompositorAnimations(aAnimationData->mAnimations,
+                              aAnimationData->mCompositorAnimationsId),
+                              aTransform,
+                              aOpacity);
+  WrBridge()->AddWebRenderParentCommand(anim);
+}
+
+already_AddRefed<WMAnimationData>
+WebRenderLayerManager::CreateOrRecycleAnimationData(nsDisplayItem* aItem)
+{
+  MOZ_ASSERT(aItem);
+  nsIFrame* frame = aItem->Frame();
+  uint32_t key = aItem->GetPerFrameKey();
+
+  RefPtr<WMItemData> data;
+
+  auto frameIter = mItemData.find(frame);
+  if (frameIter != mItemData.end()) {
+    auto dataIter = frameIter->second.find(key);
+    if (dataIter != frameIter->second.end()) {
+      data = dataIter->second;
+    }
+  } else {
+    mItemData[frame] = std::map<uint32_t, RefPtr<WMItemData>>();
+  }
+
+  if (!data) {
+    auto lastFrameIter = mLastItemData.find(frame);
+    if (lastFrameIter != mLastItemData.end()) {
+      auto dataIter = lastFrameIter->second.find(key);
+      if (dataIter != lastFrameIter->second.end()) {
+        data = dataIter->second;
+        dataIter->second = nullptr;
+        mItemData[frame][key] = data;
+      }
+    }
+  }
+  
+  if (!data) {
+    data = new WMItemData();
+    mItemData[frame][key] = data;
+  }
+
+  MOZ_ASSERT(data);
+
+  RefPtr<WMAnimationData> animationData = data->mAnimationData;
+  if (!animationData) {
+    animationData = new WMAnimationData();
+    animationData->mCompositorAnimationsId = AnimationHelper::GetNextCompositorAnimationsId();
+    data->mAnimationData = animationData;
+  }
+  
+  return animationData.forget();
+}
+
+already_AddRefed<WMImageData>
+WebRenderLayerManager::CreateOrRecycleImageData(nsDisplayItem* aItem)
+{
+  MOZ_ASSERT(aItem);
+  nsIFrame* frame = aItem->Frame();
+  uint32_t key = aItem->GetPerFrameKey();
+
+  RefPtr<WMItemData> data;
+
+  auto frameIter = mItemData.find(frame);
+  if (frameIter != mItemData.end()) {
+    auto dataIter = frameIter->second.find(key);
+    if (dataIter != frameIter->second.end()) {
+      data = dataIter->second;
+    }
+  } else {
+    mItemData[frame] = std::map<uint32_t, RefPtr<WMItemData>>();
+  }
+
+  if (!data) {
+    auto lastFrameIter = mLastItemData.find(frame);
+    if (lastFrameIter != mLastItemData.end()) {
+      auto dataIter = lastFrameIter->second.find(key);
+      if (dataIter != lastFrameIter->second.end()) {
+        data = dataIter->second;
+        dataIter->second = nullptr;
+        mItemData[frame][key] = data;
+      }
+    }
+  }
+  
+  if (!data) {
+    data = new WMItemData();
+    mItemData[frame][key] = data;
+  }
+
+  MOZ_ASSERT(data);
+
+  RefPtr<WMImageData> imageData = data->mImageData;
+  if (!imageData) {
+    imageData = new WMImageData();
+    data->mImageData = imageData;
+  }
+  
+  return imageData.forget();
+}
+
+Maybe<wr::ImageKey>
+WebRenderLayerManager::CreateImageKey(nsDisplayItem* aItem,
+                                      ImageContainer* aContainer,
+                                      mozilla::wr::DisplayListBuilder& aBuilder,
+                                      const StackingContextHelper& aSc,
+                                      gfx::IntSize& aSize)
+{
+  RefPtr<WMImageData> imageData = CreateOrRecycleImageData(aItem);
+  MOZ_ASSERT(imageData);
+
+  if (aContainer->IsAsync()) {
+    imageData->mImageClientTypeContainer = CompositableType::IMAGE_BRIDGE;
+  } else {
+    AutoLockImage autoLock(aContainer);
+    imageData->mImageClientTypeContainer = autoLock.HasImage()
+      ? CompositableType::IMAGE : CompositableType::UNKNOWN;
+  }
+
+  if (imageData->mImageClientTypeContainer == CompositableType::IMAGE && !imageData->mImageClient) {
+    imageData->mImageClient = ImageClient::CreateImageClient(CompositableType::IMAGE,
+                                                  WrBridge(),
+                                                  TextureFlags::DEFAULT);
+    if (!imageData->mImageClient) {
+      return Nothing();
+    }
+    imageData->mImageClient->Connect();
+  }
+
+  if (imageData->mImageClientTypeContainer == CompositableType::IMAGE_BRIDGE && imageData->mPipelineId.isNothing()) {
+    MOZ_ASSERT(!imageData->mImageClient);
+    // Alloc async image pipeline id.
+    imageData->mPipelineId = Some(WrBridge()->GetCompositorBridgeChild()->GetNextPipelineId());
+    WrBridge()->AddPipelineIdForAsyncCompositable(imageData->mPipelineId.ref(),
+                                                  aContainer->GetAsyncContainerHandle());
+  } else if (imageData->mImageClientTypeContainer == CompositableType::IMAGE && imageData->mExternalImageId.isNothing())  {
+    MOZ_ASSERT(imageData->mImageClient);
+    imageData->mExternalImageId = Some(WrBridge()->AllocExternalImageIdForCompositable(imageData->mImageClient));
+    MOZ_ASSERT(imageData->mExternalImageId.isSome());
+  }
+
+  if (imageData->mImageClientTypeContainer == CompositableType::IMAGE_BRIDGE) {
+    MOZ_ASSERT(!imageData->mImageClient);
+    MOZ_ASSERT(imageData->mExternalImageId.isNothing());
+
+    // Push IFrame for async image pipeline.
+    // XXX Remove this once partial display list update is supported.
+
+    //ScrollingLayersHelper scroller(this, aBuilder, aSc);
+
+    //ParentLayerRect bounds = GetLocalTransformTyped().TransformBounds(Bounds());
+
+    // We don't push a stacking context for this async image pipeline here.
+    // Instead, we do it inside the iframe that hosts the image. As a result,
+    // a bunch of the calculations normally done as part of that stacking
+    // context need to be done manually and pushed over to the parent side,
+    // where it will be done when we build the display list for the iframe.
+    // That happens in WebRenderCompositableHolder.
+
+    bool snap;
+    nsRect bounds = aItem->GetBounds(nullptr, &snap);
+    int32_t appUnitsPerDevPixel = aItem->Frame()->PresContext()->AppUnitsPerDevPixel();
+    LayoutDeviceRect rect = LayoutDeviceRect::FromAppUnits(
+                              bounds, appUnitsPerDevPixel);
+
+    WrClipRegionToken clipRegion = aBuilder.PushClipRegion(aSc.ToRelativeWrRect(rect));
+    aBuilder.PushIFrame(aSc.ToRelativeWrRect(rect), clipRegion, imageData->mPipelineId.ref());
+    gfx::Matrix4x4 scTransform;
+    LayerRect scBounds(0, 0, rect.width, rect.height);
+    MaybeIntSize scaleToSize;
+    //if (mScaleMode != ScaleMode::SCALE_NONE) {
+    //  NS_ASSERTION(mScaleMode == ScaleMode::STRETCH,
+    //               "No other scalemodes than stretch and none supported yet.");
+    //  scaleToSize = Some(mScaleToSize);
+    //}
+    //LayerRect scBounds = BoundsForStackingContext();
+    wr::ImageRendering filter = wr::ImageRendering::Auto; //wr::ToImageRendering(mSamplingFilter);
+    wr::MixBlendMode mixBlendMode = wr::MixBlendMode::Normal; //wr::ToWrMixBlendMode(GetMixBlendMode());
+
+    WrBridge()->AddWebRenderParentCommand(OpUpdateAsyncImagePipeline(imageData->mPipelineId.value(),
+                                                                     scBounds,
+                                                                     scTransform,
+                                                                     scaleToSize,
+                                                                     filter,
+                                                                     mixBlendMode));
+    return Nothing();
+  }
+
+  MOZ_ASSERT(GetImageClientType() == CompositableType::IMAGE);
+  MOZ_ASSERT(imageData->mImageClient->AsImageClientSingle());
+
+  AutoLockImage autoLock(aContainer);
+  mozilla::layers::Image* image = autoLock.GetImage();
+  if (!image) {
+    return Nothing();
+  }
+  aSize = image->GetSize();
+  ImageClientSingle* imageClient = imageData->mImageClient->AsImageClientSingle();
+  MOZ_ASSERT(imageClient);
+  MOZ_ASSERT(aContainer);
+  uint32_t oldCounter = imageClient->GetLastUpdateGenerationCounter();
+  bool ret = imageClient->UpdateImage(aContainer, /* unused */0);
+  if (!ret || imageClient->IsEmpty()) {
+    // Delete old key
+    if (imageData->mKey.isSome()) {
+      AddImageKeyForDiscard(imageData->mKey.value());
+    }
+    return Nothing();
+  }
+
+  WrImageKey key;
+  key.mNamespace = WrBridge()->GetNamespace();
+  key.mHandle = WrBridge()->GetNextResourceId();
+  WrBridge()->AddWebRenderParentCommand(OpAddExternalImage(imageData->mExternalImageId.value(), key));
+  imageData->mKey = Some(key);
+
+  if (imageData->mKey.isNothing()) {
+    return Nothing();
+  }
+  AddImageKeyForDiscard(imageData->mKey.value());
+
+  return imageData->mKey;
+}
+
+bool
+WebRenderLayerManager::PushImage(nsDisplayItem* aItem,
+                                 mozilla::wr::DisplayListBuilder& aBuilder,
+                                 const StackingContextHelper& aSc,
+                                 ImageContainer* aContainer)
+{
+  gfx::IntSize size;
+  Maybe<wr::ImageKey> key = CreateImageKey(aItem, aContainer, aBuilder, aSc, size);
+  if (!key) {
+    return false;
+  }
+
+  //ScrollingLayersHelper scroller(this, aBuilder, aSc);
+  //StackingContextHelper sc;//(aSc, aBuilder, nullptr);
+
+  LayerRect rect(0, 0, size.width, size.height);
+
+  #if 0
+  if (mScaleMode != ScaleMode::SCALE_NONE) {
+    NS_ASSERTION(mScaleMode == ScaleMode::STRETCH,
+                 "No other scalemodes than stretch and none supported yet.");
+    rect = LayerRect(0, 0, mScaleToSize.width, mScaleToSize.height);
+  }
+  #endif
+
+  LayoutDeviceRect clipRect(0, 0, size.width, size.height);
+  if (aItem->GetClip().HasClip()) {
+    int32_t appUnitsPerDevPixel = aItem->Frame()->PresContext()->AppUnitsPerDevPixel();
+    clipRect = LayoutDeviceRect::FromAppUnits(
+                aItem->GetClip().GetClipRect(), appUnitsPerDevPixel);
+  }
+
+  WrClipRegionToken clip = aBuilder.PushClipRegion(
+      aSc.ToRelativeWrRect(clipRect),
+      nullptr);
+
+  wr::ImageRendering filter = wr::ImageRendering::Auto;
+  aBuilder.PushImage(aSc.ToRelativeWrRect(rect), clip, filter, key.value());
+
+  return true;
+}
+
 void
 WebRenderLayerManager::EndTransaction(DrawPaintedLayerCallback aCallback,
                                       void* aCallbackData,
                                       EndTransactionFlags aFlags)
 {
+  AutoProfilerTracing tracing("Paint", "EndTransaction");
   DiscardImages();
   WrBridge()->RemoveExpiredFontKeys();
   EndTransactionInternal(aCallback, aCallbackData, aFlags);

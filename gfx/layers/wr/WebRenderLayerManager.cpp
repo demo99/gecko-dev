@@ -424,6 +424,53 @@ WebRenderLayerManager::CreateOrRecycleImageData(nsDisplayItem* aItem)
   return imageData.forget();
 }
 
+already_AddRefed<WMCanvasData>
+WebRenderLayerManager::CreateOrRecycleCanvasData(nsDisplayItem* aItem)
+{
+  MOZ_ASSERT(aItem);
+  nsIFrame* frame = aItem->Frame();
+  uint32_t key = aItem->GetPerFrameKey();
+
+  RefPtr<WMItemData> data;
+
+  auto frameIter = mItemData.find(frame);
+  if (frameIter != mItemData.end()) {
+    auto dataIter = frameIter->second.find(key);
+    if (dataIter != frameIter->second.end()) {
+      data = dataIter->second;
+    }
+  } else {
+    mItemData[frame] = std::map<uint32_t, RefPtr<WMItemData>>();
+  }
+
+  if (!data) {
+    auto lastFrameIter = mLastItemData.find(frame);
+    if (lastFrameIter != mLastItemData.end()) {
+      auto dataIter = lastFrameIter->second.find(key);
+      if (dataIter != lastFrameIter->second.end()) {
+        data = dataIter->second;
+        dataIter->second = nullptr;
+        mItemData[frame][key] = data;
+      }
+    }
+  }
+
+  if (!data) {
+    data = new WMItemData();
+    mItemData[frame][key] = data;
+  }
+
+  MOZ_ASSERT(data);
+
+  RefPtr<WMCanvasData> canvasData = data->mCanvasData;
+  if (!canvasData) {
+    canvasData = new WMCanvasData();
+    data->mCanvasData = canvasData;
+  }
+
+  return canvasData.forget();
+}
+
 Maybe<wr::ImageKey>
 WebRenderLayerManager::CreateImageKey(nsDisplayItem* aItem,
                                       ImageContainer* aContainer,

@@ -16,6 +16,9 @@
 #include "ImageLayers.h"
 #include "Layers.h"
 #include "ActiveLayerTracker.h"
+#include "mozilla/layers/StackingContextHelper.h"
+#include "mozilla/layers/WebRenderLayerManager.h"
+#include "mozilla/layers/WebRenderLayer.h"
 
 #include <algorithm>
 
@@ -114,9 +117,31 @@ public:
                                              LayerManager* aManager,
                                              const ContainerLayerParameters& aContainerParameters) override
   {
+    CanvasLayer* oldLayer = static_cast<CanvasLayer*>
+      (aManager->GetLayerBuilder()->GetLeafLayerFor(aBuilder, this));
+
     return static_cast<nsHTMLCanvasFrame*>(mFrame)->
-      BuildLayer(aBuilder, aManager, this, aContainerParameters);
+      BuildLayer(aBuilder, aManager, this, aContainerParameters, oldLayer);
   }
+
+   virtual bool CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                        const StackingContextHelper& aSc,
+                                        nsTArray<WebRenderParentCommand>& aParentCommands,
+                                        mozilla::layers::WebRenderLayerManager* aManager,
+                                        nsDisplayListBuilder* aDisplayListBuilder)
+   {
+     RefPtr<WMCanvasData> canvasData = aManager->CreateOrRecycleCanvasData(this);
+     ContainerLayerParameters containerParameters;
+     containerParameters.mOffset.x = aSc.Origin().x;
+     containerParameters.mOffset.y = aSc.Origin().y;
+     canvasData->mLayer = static_cast<nsHTMLCanvasFrame*>(mFrame)->
+                            BuildLayer(aDisplayListBuilder, aManager, this, containerParameters, canvasData->mLayer);
+     if (canvasData->mLayer) {
+       WebRenderLayer::ToWebRenderLayer(canvasData->mLayer)->RenderLayer(aBuilder, aSc);
+     }
+     return true;
+   }
+
   virtual LayerState GetLayerState(nsDisplayListBuilder* aBuilder,
                                    LayerManager* aManager,
                                    const ContainerLayerParameters& aParameters) override
@@ -321,7 +346,8 @@ already_AddRefed<Layer>
 nsHTMLCanvasFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
                               LayerManager* aManager,
                               nsDisplayItem* aItem,
-                              const ContainerLayerParameters& aContainerParameters)
+                              const ContainerLayerParameters& aContainerParameters,
+                              Layer* aOldLayer)
 {
   nsRect area = GetContentRectRelativeToSelf() + aItem->ToReferenceFrame();
   HTMLCanvasElement* element = static_cast<HTMLCanvasElement*>(GetContent());
@@ -333,9 +359,7 @@ nsHTMLCanvasFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
   if (canvasSizeInPx.width <= 0 || canvasSizeInPx.height <= 0 || area.IsEmpty())
     return nullptr;
 
-  CanvasLayer* oldLayer = static_cast<CanvasLayer*>
-    (aManager->GetLayerBuilder()->GetLeafLayerFor(aBuilder, aItem));
-  RefPtr<Layer> layer = element->GetCanvasLayer(aBuilder, oldLayer, aManager);
+  RefPtr<Layer> layer = element->GetCanvasLayer(aBuilder, aOldLayer, aManager);
   if (!layer)
     return nullptr;
 

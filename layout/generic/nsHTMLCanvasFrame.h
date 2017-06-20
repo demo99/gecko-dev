@@ -51,7 +51,8 @@ public:
   already_AddRefed<Layer> BuildLayer(nsDisplayListBuilder* aBuilder,
                                      LayerManager* aManager,
                                      nsDisplayItem* aItem,
-                                     const ContainerLayerParameters& aContainerParameters);
+                                     const ContainerLayerParameters& aContainerParameters,
+                                     Layer* aOldLayer);
 
   /* get the size of the canvas's image */
   nsIntSize GetCanvasSize();

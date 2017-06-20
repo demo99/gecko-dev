@@ -112,6 +112,15 @@ public:
   Maybe<wr::PipelineId> mPipelineId;
 };
 
+
+class WMCanvasData
+{
+public:
+  NS_INLINE_DECL_REFCOUNTING(TransactionIdAllocator)
+
+  RefPtr<Layer> mLayer;
+};
+
 class WMItemData
 {
 public:
@@ -119,6 +128,7 @@ public:
 
   RefPtr<WMAnimationData> mAnimationData;
   RefPtr<WMImageData> mImageData;
+  RefPtr<WMCanvasData> mCanvasData;
 };
 
 class WebRenderLayerManager final : public LayerManager
@@ -260,6 +270,7 @@ public:
                          OptionalTransform aTransform);
   already_AddRefed<WMAnimationData> CreateOrRecycleAnimationData(nsDisplayItem* aItem);
   already_AddRefed<WMImageData> CreateOrRecycleImageData(nsDisplayItem* aItem);
+  already_AddRefed<WMCanvasData> CreateOrRecycleCanvasData(nsDisplayItem* aItem);
 
 private:
   /**

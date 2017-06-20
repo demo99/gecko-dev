@@ -74,6 +74,7 @@ public:
   WrPoint ToRelativeWrPoint(const LayerPoint& aPoint) const;
   // Same but rounds the rectangle to ints after transforming.
   WrRect ToRelativeWrRectRounded(const LayoutDeviceRect& aRect) const;
+  LayerPoint Origin() const { return mOrigin; }
 
 private:
   wr::DisplayListBuilder* mBuilder;

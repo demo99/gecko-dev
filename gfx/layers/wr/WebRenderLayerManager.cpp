@@ -321,7 +321,6 @@ WebRenderLayerManager::SendAnimationData(WMAnimationData* aAnimationData,
                                                  anim.playbackRate());
     }
   }
-  MOZ_ASSERT(data);
   OpAddCompositorAnimations
     anim(CompositorAnimations(aAnimationData->mAnimations,
                               aAnimationData->mCompositorAnimationsId),
@@ -512,7 +511,7 @@ WebRenderLayerManager::CreateImageKey(nsDisplayItem* aItem,
     return Nothing();
   }
 
-  MOZ_ASSERT(GetImageClientType() == CompositableType::IMAGE);
+  MOZ_ASSERT(imageData->mImageClientTypeContainer == CompositableType::IMAGE);
   MOZ_ASSERT(imageData->mImageClient->AsImageClientSingle());
 
   AutoLockImage autoLock(aContainer);

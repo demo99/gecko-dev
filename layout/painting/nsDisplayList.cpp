@@ -1066,7 +1066,7 @@ nsDisplayListBuilder::AddAnimationsAndTransitionsToWRLayerManager(WebRenderLayer
 
   // Only send animations to a layer that is actually using
   // off-main-thread compositing.
-  MOZ_ASSERT(backend == layers::LayersBackend::LAYERS_WR);
+  //MOZ_ASSERT(backend == layers::LayersBackend::LAYERS_WR);
 
   bool pending = !aBuilder;
 #if 0
@@ -8088,6 +8088,8 @@ nsDisplayTransform::CreateWebRenderCommands(mozilla::wr::DisplayListBuilder& aBu
                                                                 aDisplayListBuilder,
                                                                 sc,
                                                                 aBuilder);
+
+  return true;
 }
 
 already_AddRefed<Layer> nsDisplayTransform::BuildLayer(nsDisplayListBuilder *aBuilder,

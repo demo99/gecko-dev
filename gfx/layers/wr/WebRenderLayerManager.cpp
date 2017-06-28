@@ -20,13 +20,145 @@
 #include "WebRenderPaintedLayerBlob.h"
 #include "WebRenderTextLayer.h"
 #include "WebRenderDisplayItemLayer.h"
-#include "nsDisplayList.h"
 
 namespace mozilla {
 
 using namespace gfx;
 
 namespace layers {
+
+WebRenderBridgeChild*
+WebRenderUserData::WrBridge() const
+{
+  return mWRManager->WrBridge();
+}
+
+WebRenderImageData::WebRenderImageData(WebRenderLayerManager* aWRManager)
+  : WebRenderUserData(aWRManager)
+{
+}
+
+WebRenderImageData::~WebRenderImageData()
+{
+  if (mKey) {
+    mWRManager->AddImageKeyForDiscard(mKey.value());
+  }
+
+  if (mExternalImageId) {
+    WrBridge()->DeallocExternalImageId(mExternalImageId.ref());
+  }
+
+  if (mPipelineId) {
+    WrBridge()->RemovePipelineIdForAsyncCompositable(mPipelineId.ref());
+  }
+}
+
+Maybe<wr::ImageKey>
+WebRenderImageData::UpdateImageKey(ImageContainer* aContainer)
+{
+  CreateImageClientIfNeeded();
+  CreateExternalImageIfNeeded();
+
+  if (!mImageClient || !mExternalImageId) {
+    return Nothing();
+  }
+
+  MOZ_ASSERT(mImageClient->AsImageClientSingle());
+  MOZ_ASSERT(aContainer);
+
+  ImageClientSingle* imageClient = mImageClient->AsImageClientSingle();
+  uint32_t oldCounter = imageClient->GetLastUpdateGenerationCounter();
+
+  bool ret = imageClient->UpdateImage(aContainer, /* unused */0);
+  if (!ret || imageClient->IsEmpty()) {
+    // Delete old key
+    if (mKey) {
+      mWRManager->AddImageKeyForDiscard(mKey.value());
+      mKey = Nothing();
+    }
+    return Nothing();
+  }
+
+  // Reuse old key if generation is not updated.
+  if (oldCounter == imageClient->GetLastUpdateGenerationCounter() && mKey) {
+    return mKey;
+  }
+
+  // Delete old key, we are generating a new key.
+  if (mKey) {
+    mWRManager->AddImageKeyForDiscard(mKey.value());
+  }
+
+  WrImageKey key = WrBridge()->GetNextImageKey();
+  mWRManager->WrBridge()->AddWebRenderParentCommand(OpAddExternalImage(mExternalImageId.value(), key));
+  mKey = Some(key);
+
+  return mKey;
+}
+
+void
+WebRenderImageData::CreateAsyncImageWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                                      ImageContainer* aContainer,
+                                                      const StackingContextHelper& aSc,
+                                                      const LayerRect& aBounds,
+                                                      const LayerRect& aSCBounds,
+                                                      const Matrix4x4& aSCTransform,
+                                                      const MaybeIntSize& aScaleToSize,
+                                                      const WrImageRendering& aFilter,
+                                                      const WrMixBlendMode& aMixBlendMode)
+{
+  MOZ_ASSERT(aContainer->IsAsync());
+  if (!mPipelineId) {
+    // Alloc async image pipeline id.
+    mPipelineId = Some(WrBridge()->GetCompositorBridgeChild()->GetNextPipelineId());
+    WrBridge()->AddPipelineIdForAsyncCompositable(mPipelineId.ref(),
+                                                  aContainer->GetAsyncContainerHandle());
+  }
+  MOZ_ASSERT(!mImageClient);
+  MOZ_ASSERT(!mExternalImageId);
+
+  // Push IFrame for async image pipeline.
+  //
+  // We don't push a stacking context for this async image pipeline here.
+  // Instead, we do it inside the iframe that hosts the image. As a result,
+  // a bunch of the calculations normally done as part of that stacking
+  // context need to be done manually and pushed over to the parent side,
+  // where it will be done when we build the display list for the iframe.
+  // That happens in WebRenderCompositableHolder.
+  WrRect r = aSc.ToRelativeWrRect(aBounds);
+  aBuilder.PushIFrame(r, r, mPipelineId.ref());
+
+  WrBridge()->AddWebRenderParentCommand(OpUpdateAsyncImagePipeline(mPipelineId.value(),
+                                                                   aSCBounds,
+                                                                   aSCTransform,
+                                                                   aScaleToSize,
+                                                                   aFilter,
+                                                                   aMixBlendMode));
+}
+
+void
+WebRenderImageData::CreateImageClientIfNeeded()
+{
+  if (!mImageClient) {
+    mImageClient = ImageClient::CreateImageClient(CompositableType::IMAGE,
+                                                  WrBridge(),
+                                                  TextureFlags::DEFAULT);
+    if (!mImageClient) {
+      return;
+    }
+
+    mImageClient->Connect();
+  }
+}
+
+void
+WebRenderImageData::CreateExternalImageIfNeeded()
+{
+  if (!mExternalImageId)  {
+    MOZ_ASSERT(mImageClient);
+    mExternalImageId = Some(WrBridge()->AllocExternalImageIdForCompositable(mImageClient));
+  }
+}
 
 WebRenderLayerManager::WebRenderLayerManager(nsIWidget* aWidget)
   : mWidget(aWidget)
@@ -237,6 +369,66 @@ WebRenderLayerManager::EndTransactionWithoutLayer(nsDisplayList* aDisplayList,
                          aDisplayListBuilder);
 }
 
+Maybe<wr::ImageKey>
+WebRenderLayerManager::CreateImageKey(nsDisplayItem* aItem,
+                                      ImageContainer* aContainer,
+                                      mozilla::wr::DisplayListBuilder& aBuilder,
+                                      const StackingContextHelper& aSc,
+                                      gfx::IntSize& aSize)
+{
+  RefPtr<WebRenderImageData> imageData = CreateOrRecycleWebRenderUserData<WebRenderImageData>(aItem);
+  MOZ_ASSERT(imageData);
+
+  if (aContainer->IsAsync()) {
+    bool snap;
+    nsRect bounds = aItem->GetBounds(nullptr, &snap);
+    int32_t appUnitsPerDevPixel = aItem->Frame()->PresContext()->AppUnitsPerDevPixel();
+    LayerRect rect = ViewAs<LayerPixel>(
+      LayoutDeviceRect::FromAppUnits(bounds, appUnitsPerDevPixel),
+      PixelCastJustification::WebRenderHasUnitResolution);
+    LayerRect scBounds(0, 0, rect.width, rect.height);
+    imageData->CreateAsyncImageWebRenderCommands(aBuilder,
+                                                 aContainer,
+                                                 aSc,
+                                                 rect,
+                                                 scBounds,
+                                                 gfx::Matrix4x4(),
+                                                 Nothing(),
+                                                 wr::ImageRendering::Auto,
+                                                 wr::MixBlendMode::Normal);
+    return Nothing();
+  }
+
+  AutoLockImage autoLock(aContainer);
+  if (!autoLock.HasImage()) {
+    return Nothing();
+  }
+  mozilla::layers::Image* image = autoLock.GetImage();
+  aSize = image->GetSize();
+
+  return imageData->UpdateImageKey(aContainer);
+}
+
+bool
+WebRenderLayerManager::PushImage(nsDisplayItem* aItem,
+                                 ImageContainer* aContainer,
+                                 mozilla::wr::DisplayListBuilder& aBuilder,
+                                 const StackingContextHelper& aSc,
+                                 const LayerRect& aRect)
+{
+  gfx::IntSize size;
+  Maybe<wr::ImageKey> key = CreateImageKey(aItem, aContainer, aBuilder, aSc, size);
+  if (!key) {
+    return false;
+  }
+
+  wr::ImageRendering filter = wr::ImageRendering::Auto;
+  auto r = aSc.ToRelativeWrRect(aRect);
+  aBuilder.PushImage(r, r, filter, key.value());
+
+  return true;
+}
+
 void
 WebRenderLayerManager::EndTransaction(DrawPaintedLayerCallback aCallback,
                                       void* aCallbackData,
@@ -284,6 +476,8 @@ WebRenderLayerManager::EndTransactionInternal(DrawPaintedLayerCallback aCallback
       mParentCommands.Clear();
       CreateWebRenderCommandsFromDisplayList(aDisplayList, aDisplayListBuilder, sc, builder);
       builder.Finalize(contentSize, mBuiltDisplayList);
+      mLastItemData.SwapElements(mItemData);
+      mItemData.Clear();
     }
 
     builder.PushBuiltDisplayList(mBuiltDisplayList);

@@ -14,9 +14,9 @@
 #include "mozilla/layers/TransactionIdAllocator.h"
 #include "mozilla/webrender/WebRenderAPI.h"
 #include "mozilla/webrender/WebRenderTypes.h"
+#include "nsDisplayList.h"
 
 class nsIWidget;
-class nsDisplayList;
 
 namespace mozilla {
 namespace layers {
@@ -26,6 +26,103 @@ class KnowsCompositor;
 class PCompositorBridgeChild;
 class WebRenderBridgeChild;
 class WebRenderParentCommand;
+
+typedef Pair<nsIFrame*, uint32_t> FrameDisplayItemKey;
+
+/**
+ * A hash entry that combines frame pointer and display item's per frame key.
+ */
+class FrameDisplayItemKeyHashEntry : public PLDHashEntryHdr
+{
+public:
+  typedef FrameDisplayItemKey KeyType;
+  typedef const FrameDisplayItemKey* KeyTypePointer;
+
+  explicit FrameDisplayItemKeyHashEntry(KeyTypePointer aKey)
+    : mKey(*aKey) { }
+  explicit FrameDisplayItemKeyHashEntry(const FrameDisplayItemKeyHashEntry& aCopy) = default;
+
+  ~FrameDisplayItemKeyHashEntry() = default;
+
+  KeyType GetKey() const { return mKey; }
+  bool KeyEquals(KeyTypePointer aKey) const
+  {
+    return mKey.first() == aKey->first() && mKey.second() == aKey->second();
+  }
+
+  static KeyTypePointer KeyToPointer(KeyType& aKey) { return &aKey; }
+  static PLDHashNumber HashKey(KeyTypePointer aKey)
+  {
+    if (!aKey)
+      return 0;
+
+    return HashGeneric(aKey->first(), aKey->second());
+  }
+
+  enum { ALLOW_MEMMOVE = true };
+
+  FrameDisplayItemKey mKey;
+};
+
+class WebRenderImageData;
+
+class WebRenderUserData
+{
+public:
+  NS_INLINE_DECL_REFCOUNTING(WebRenderUserData)
+
+  explicit WebRenderUserData(WebRenderLayerManager* aWRManager)
+    : mWRManager(aWRManager)
+  { }
+
+  virtual WebRenderImageData* AsImageData() { return nullptr; }
+
+  enum class TYPE {
+    IMAGE,
+  };
+
+  virtual TYPE GetType() = 0;
+
+protected:
+  virtual ~WebRenderUserData() {}
+
+  WebRenderBridgeChild* WrBridge() const;
+
+  WebRenderLayerManager* mWRManager;
+};
+
+class WebRenderImageData : public WebRenderUserData
+{
+public:
+  explicit WebRenderImageData(WebRenderLayerManager* aWRManager);
+  virtual ~WebRenderImageData();
+
+  virtual WebRenderImageData* AsImageData() override { return this; }
+  virtual TYPE GetType() override { return TYPE::IMAGE; }
+  static TYPE Type() { return TYPE::IMAGE; }
+
+  Maybe<wr::ImageKey> UpdateImageKey(ImageContainer* aContainer);
+
+  void CreateAsyncImageWebRenderCommands(mozilla::wr::DisplayListBuilder& aBuilder,
+                                         ImageContainer* aContainer,
+                                         const StackingContextHelper& aSc,
+                                         const LayerRect& aBounds,
+                                         const LayerRect& aSCBounds,
+                                         const gfx::Matrix4x4& aSCTransform,
+                                         const gfx::MaybeIntSize& aScaleToSize,
+                                         const WrImageRendering& aFilter,
+                                         const WrMixBlendMode& aMixBlendMode);
+
+protected:
+  void CreateImageClientIfNeeded();
+  void CreateExternalImageIfNeeded();
+
+  wr::MaybeExternalImageId mExternalImageId;
+  Maybe<wr::ImageKey> mKey;
+  RefPtr<ImageClient> mImageClient;
+  Maybe<wr::PipelineId> mPipelineId;
+  RefPtr<ImageContainer> mContainer;
+};
 
 class WebRenderLayerManager final : public LayerManager
 {
@@ -50,6 +147,16 @@ public:
   virtual bool BeginTransactionWithTarget(gfxContext* aTarget) override;
   virtual bool BeginTransaction() override;
   virtual bool EndEmptyTransaction(EndTransactionFlags aFlags = END_DEFAULT) override;
+  Maybe<wr::ImageKey> CreateImageKey(nsDisplayItem* aItem,
+                                     ImageContainer* aContainer,
+                                     mozilla::wr::DisplayListBuilder& aBuilder,
+                                     const StackingContextHelper& aSc,
+                                     gfx::IntSize& aSize);
+  bool PushImage(nsDisplayItem* aItem,
+                 ImageContainer* aContainer,
+                 mozilla::wr::DisplayListBuilder& aBuilder,
+                 const StackingContextHelper& aSc,
+                 const LayerRect& aRect);
   void CreateWebRenderCommandsFromDisplayList(nsDisplayList* aDisplayList,
                                               nsDisplayListBuilder* aDisplayListBuilder,
                                               StackingContextHelper& aSc,
@@ -149,6 +256,34 @@ public:
   const APZTestData& GetAPZTestData() const
   { return mApzTestData; }
 
+  template<class T> already_AddRefed<T>
+  CreateOrRecycleWebRenderUserData(nsDisplayItem* aItem)
+  {
+    MOZ_ASSERT(aItem);
+    FrameDisplayItemKey key = MakePair(aItem->Frame(), aItem->GetPerFrameKey());
+
+    RefPtr<WebRenderUserData> data;
+
+    if (auto entry = mItemData.Lookup(key)) {
+      data = entry.Data();
+    } else if (auto entry = mLastItemData.Lookup(key)) {
+      data = entry.Data();
+      mItemData.Put(key, data);
+      entry.Remove();
+    }
+
+    if (!data || (data->GetType() != T::Type())) {
+      data = new T(this);
+      mItemData.Put(key, data);
+    }
+
+    MOZ_ASSERT(data);
+    MOZ_ASSERT(data->GetType() == T::Type());
+
+    RefPtr<T> res = static_cast<T*>(data.get());
+    return res.forget();
+  }
+
 private:
   /**
    * Take a snapshot of the parent context, and copy
@@ -187,6 +322,17 @@ private:
   // empty transactions in layers-free mode.
   wr::BuiltDisplayList mBuiltDisplayList;
   nsTArray<WebRenderParentCommand> mParentCommands;
+
+  // Those are data that we kept between transactions. We used to cache some
+  // data in the layer. But in layers free mode, we don't have layer which
+  // means we need some other place to cached the data between transaction.
+  // That's what mItemData and mLastItemData do.
+  //
+  // In CreateOrRecycleWebRenderUserData function, we first check data is presence
+  // in the mItemData, if not, check it is in mLastItemData. And in EndTransaction,
+  // Replace mLastItemData with mItemData.
+  nsRefPtrHashtable<FrameDisplayItemKeyHashEntry, WebRenderUserData> mItemData;
+  nsRefPtrHashtable<FrameDisplayItemKeyHashEntry, WebRenderUserData> mLastItemData;
 
   // Layers that have been mutated. If we have an empty transaction
   // then a display item layer will no longer be valid
